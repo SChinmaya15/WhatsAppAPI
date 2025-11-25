@@ -24,8 +24,12 @@ namespace backend.Services
             WhatsAppService whatsAppService, IOptions<WhatsAppOptions> opts, IConversationStore store,
             GeminiService geminiService)
         {
-            if(!clients.Any())
-            clients = ReadClientDetails(@"client details.xlsx");
+            if (!clients.Any())
+            {
+                var root = Directory.GetParent(AppContext.BaseDirectory).Parent.Parent.FullName;
+                var filePath = Path.Combine(root, "client details.xlsx");
+                clients = ReadClientDetails(filePath);
+            }
 
             _geminiService = geminiService;
             _store = store;
