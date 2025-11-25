@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using JsonConvert = Newtonsoft.Json.JsonConvert;
+using ClosedXML.Excel;
 
 namespace backend.Services
 {
@@ -17,12 +18,15 @@ namespace backend.Services
         private readonly GeminiService _geminiService;
         private readonly TimeSpan _recentThreshold = TimeSpan.FromHours(24); // treat messages within 24h as conversation continuation
         private static readonly Regex GreetingIdentifierRegex = GreetingRegex();
-
+        private static List<ClientDetails> clients=new List<ClientDetails>();
 
         public WebhookService(MongoRepo repo,
             WhatsAppService whatsAppService, IOptions<WhatsAppOptions> opts, IConversationStore store,
             GeminiService geminiService)
         {
+            if(!clients.Any())
+            clients = ReadClientDetails(@"client details.xlsx");
+
             _geminiService = geminiService;
             _store = store;
             _repo = repo;
@@ -73,10 +77,18 @@ namespace backend.Services
                                 if (match.Success)
                                 {
                                     var ticket = match.Groups["CustId"].Value;
-                                    var message = match.Groups["message"].Value;
-                                    mailBody= await _geminiService.GetFormalQueryMailBodyAsync(message, getUserName(ticket), CancellationToken.None);
+                                    if (!clients.Where(cust => cust.CustomerId == ticket).Any())
+                                    {
+                                        replyText = $"Sorry there is no one with the CustomerId: {ticket} with us.";
+                                    }
+                                    else
+                                    {
+                                        var message = match.Groups["message"].Value;
+                                        mailBody = await _geminiService.GetFormalQueryMailBodyAsync(message, getUserName(ticket), CancellationToken.None);
+                                        replyText = "Query has been registered successfully.";
+                                    }
                                 }
-                                replyText = "Query has been registered successfully.";
+                                
                             }
                             var resp = await _whatsAppService.SendTextAsync(to: from!, text: replyText, mailBody);
                             var respContent = await resp.Content.ReadAsStringAsync();
@@ -91,6 +103,55 @@ namespace backend.Services
                 throw new Exception(ex.Message, ex);
             }
         }
+        public static List<ClientDetails> ReadClientDetails(string filePath)
+        {
+            var list = new List<ClientDetails>();
+
+            var workbook = new XLWorkbook(filePath);
+            var ws = workbook.Worksheet(1); // first worksheet
+
+            // Detect header row (assumes headers are in row 1)
+            var headerRow = 1;
+            var lastRow = ws.LastRowUsed().RowNumber();
+            var lastCol = ws.LastColumnUsed().ColumnNumber();
+
+            // Optional: find column indexes by header name for safety
+            var colClientName = 1;   // default fallbacks
+            var colClientMailId = 2;
+            var colCustomerId = 3;
+
+            // Try to detect by header text (case-insensitive)
+            for (int col = 1; col <= lastCol; col++)
+            {
+                var header = ws.Cell(headerRow, col).GetString().Trim().ToLowerInvariant();
+                if (string.IsNullOrEmpty(header)) continue;
+                if (header.Contains("client name")) colClientName = col;
+                else if (header.Contains("client mail")) colClientMailId = col;
+                else if (header.Contains("customer id") || header.Contains("customerid")) colCustomerId = col;
+            }
+
+            // Read rows (start at headerRow + 1)
+            for (int row = headerRow + 1; row <= lastRow; row++)
+            {
+                var name = ws.Cell(row, colClientName).GetString().Trim();
+                var mail = ws.Cell(row, colClientMailId).GetString().Trim();
+                var cid = ws.Cell(row, colCustomerId).GetString().Trim();
+
+                // skip blank rows
+                if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(mail) && string.IsNullOrEmpty(cid))
+                    continue;
+
+                list.Add(new ClientDetails
+                {
+                    ClientName = name,
+                    ClientMailId = mail,
+                    CustomerId = cid
+                });
+            }
+
+            return list;
+        }
+
 
         private async Task<bool> IsInitialMessageAsync(JsonElement msgElement, string? from, string? incomingText)
         {
@@ -145,5 +206,12 @@ namespace backend.Services
                         };
             return items.Where(usr => usr.Id == id).FirstOrDefault().Name;
         }
+    }
+
+    public class ClientDetails
+    {
+        public string ClientName { get; set; }
+        public string ClientMailId { get; set; }
+        public string CustomerId { get; set; }
     }
 }
