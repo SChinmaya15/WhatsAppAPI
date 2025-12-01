@@ -39,7 +39,7 @@ namespace backend.Controllers
                 // Save intent to DB (optimistic)
                 await _repo.CreateMessageAsync(record);
 
-                var resp = await _whatsAppService.SendTextAsync(message.To, message.Message,"");
+                var resp = await _whatsAppService.SendTextAsync(message.To, message.Message,"","");
                 if (!resp.IsSuccessStatusCode)
                 {
                     // Update DB etc - simplified

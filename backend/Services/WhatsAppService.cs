@@ -25,7 +25,7 @@ namespace backend.Services
             _emailService = emailService;
         }
 
-        public async Task<HttpResponseMessage> SendTextAsync(string to, string text, string mailBody, bool useTemplate = false, object templatePayload = null)
+        public async Task<HttpResponseMessage> SendTextAsync(string to, string text, string mailBody, string custId, bool useTemplate = false, object templatePayload = null)
         {
             var client = _http.CreateClient("meta");
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _opts.AccessToken);
@@ -55,7 +55,7 @@ namespace backend.Services
                     var emailBodyText = PopulateMessageContent(to, message);
                     if(mailBody!="")
                     await _emailService.SendEmailAsync(
-                        subject: "Query Raised from WA",
+                        subject: $"Query Raised from Customer: {custId}",
                         toEmail: "samchinmaya15@gmail.com",
                         body: mailBody
                     );

@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using JsonConvert = Newtonsoft.Json.JsonConvert;
 using ClosedXML.Excel;
+using System.Globalization;
 
 namespace backend.Services
 {
@@ -26,7 +27,7 @@ namespace backend.Services
         {
             if (!clients.Any())
             {
-                var root = Directory.GetParent(AppContext.BaseDirectory).Parent.Parent.FullName;
+                var root = Directory.GetParent(AppContext.BaseDirectory).Parent.Parent.Parent.FullName;
                 var filePath = Path.Combine(root, "client details.xlsx");
                 clients = ReadClientDetails(filePath);
             }
@@ -54,11 +55,21 @@ namespace backend.Services
                             string incomingMsgId = m.GetProperty("id").GetString() ?? "";
                             string text = m.GetProperty("text").GetProperty("body").GetString() ?? "";
 
-                            // RULE-BASED initial message check
-                            bool isInitial  = Regex.IsMatch(
-                                                 text,
-                                                 @"\b(hi|hello|hey|get started|start|good morning|good afternoon)\b",
-                                                 RegexOptions.IgnoreCase);
+                            var exists = IdExists(incomingMsgId);
+                            if(exists)
+                            { 
+                                return; 
+                            }
+                            else
+                            {
+                                AddId(incomingMsgId);
+                            }
+                                // RULE-BASED initial message check
+                                bool isInitial = Regex.IsMatch(
+                                                     text,
+                                                     @"\b(hi|hello|hey|get started|start|good morning|good afternoon)\b",
+                                                     RegexOptions.IgnoreCase);
+                            
 
                             var rec = new MessageRecord
                             {
@@ -70,17 +81,19 @@ namespace backend.Services
                             };
                             string replyText = string.Empty;
                             string mailBody = string.Empty;
+                            string ticket = string.Empty;
                             if (isInitial)
                             {
                                 replyText = $"Hi, Please mention Your Query in this format \"<CustID> :<Query>\"";//";
                             }
                             else
                             {
-                                var pattern = @"^(?<CustId>\d{1,6})\s*:\s*(?<message>.+)$";
-                                var match = Regex.Match(text, pattern);
+                                var pattern = @"^(?<code>[A-Z]{3}\d{3})\s*:\s*(?<message>.+)$";
+                                var regex=new Regex(pattern, RegexOptions.IgnoreCase);
+                                var match = regex.Match(text);
                                 if (match.Success)
                                 {
-                                    var ticket = match.Groups["CustId"].Value;
+                                    ticket = match.Groups["code"].Value;
                                     if (!clients.Where(cust => cust.CustomerId == ticket).Any())
                                     {
                                         replyText = $"Sorry there is no one with the CustomerId: {ticket} with us.";
@@ -88,13 +101,13 @@ namespace backend.Services
                                     else
                                     {
                                         var message = match.Groups["message"].Value;
-                                        mailBody = await _geminiService.GetFormalQueryMailBodyAsync(message, getUserName(ticket), CancellationToken.None);
+                                        mailBody = $"Query from {clients.FirstOrDefault(cust => cust.CustomerId == ticket).ClientName} and query is {message}.";//await _geminiService.GetFormalQueryMailBodyAsync(message, clients.FirstOrDefault(cust => cust.CustomerId == ticket).ClientName, CancellationToken.None);
                                         replyText = "Query has been registered successfully.";
                                     }
                                 }
                                 
                             }
-                            var resp = await _whatsAppService.SendTextAsync(to: from!, text: replyText, mailBody);
+                            var resp = await _whatsAppService.SendTextAsync(to: from!, text: replyText, mailBody,ticket);
                             var respContent = await resp.Content.ReadAsStringAsync();
 
                             await _repo.CreateMessageAsync(rec);
@@ -106,6 +119,20 @@ namespace backend.Services
             {
                 throw new Exception(ex.Message, ex);
             }
+        }
+        Queue<string> lastFiveIds = new Queue<string>();
+
+        private void AddId(string newId)
+        {
+            // If we already have 5, remove the oldest
+            if (lastFiveIds.Count == 5)
+                lastFiveIds.Dequeue();
+
+            lastFiveIds.Enqueue(newId);
+        }
+        bool IdExists(string id)
+        {
+            return lastFiveIds.Contains(id);
         }
         public static List<ClientDetails> ReadClientDetails(string filePath)
         {
