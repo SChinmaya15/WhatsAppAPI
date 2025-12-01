@@ -25,7 +25,7 @@ namespace backend.Services
             _emailService = emailService;
         }
 
-        public async Task<HttpResponseMessage> SendTextAsync(string to, string text, string mailBody, string custId, bool useTemplate = false, object templatePayload = null)
+        public async Task<HttpResponseMessage> SendTextAsync(string to, string text, string mailBody, string custId,string toMail, bool useTemplate = false, object templatePayload = null)
         {
             var client = _http.CreateClient("meta");
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _opts.AccessToken);
@@ -56,7 +56,7 @@ namespace backend.Services
                     if(mailBody!="")
                     await _emailService.SendEmailAsync(
                         subject: $"Query Raised from Customer: {custId}",
-                        toEmail: "samchinmaya15@gmail.com",
+                        toEmail: string.IsNullOrEmpty(toMail) ?"samchinmaya15@gmail.com":toMail,
                         body: mailBody
                     );
                     await _repo.CreateMessageAsync(emailBodyText);
