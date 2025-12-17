@@ -1,12 +1,13 @@
 ﻿using backend.Config;
 using backend.Infrastructure;
 using backend.Models;
+using ClosedXML.Excel;
 using Microsoft.Extensions.Options;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using JsonConvert = Newtonsoft.Json.JsonConvert;
-using ClosedXML.Excel;
-using System.Globalization;
 
 namespace backend.Services
 {
@@ -16,14 +17,13 @@ namespace backend.Services
         private readonly WhatsAppOptions _opts;
         private readonly IConversationStore _store;
         private readonly WhatsAppService _whatsAppService;
-        private readonly GeminiService _geminiService;
         private readonly TimeSpan _recentThreshold = TimeSpan.FromHours(24); // treat messages within 24h as conversation continuation
         private static readonly Regex GreetingIdentifierRegex = GreetingRegex();
-        private static List<ClientDetails> clients=new List<ClientDetails>();
+        private static readonly Regex QueryIdentifierRegex = QueryRegex();
+        private static List<ClientDetails> clients = new List<ClientDetails>();
 
-        public WebhookService(MongoRepo repo,
-            WhatsAppService whatsAppService, IOptions<WhatsAppOptions> opts, IConversationStore store,
-            GeminiService geminiService)
+        public WebhookService(MongoRepo repo, IConversationStore store,
+            WhatsAppService whatsAppService, IOptions<WhatsAppOptions> opts)
         {
             if (!clients.Any())
             {
@@ -31,10 +31,8 @@ namespace backend.Services
                 var filePath = Path.Combine(root, "client details.xlsx");
                 clients = ReadClientDetails(filePath);
             }
-
-            _geminiService = geminiService;
-            _store = store;
             _repo = repo;
+            _store = store;
             _opts = opts.Value;
             _whatsAppService = whatsAppService;
         }
@@ -56,84 +54,59 @@ namespace backend.Services
                             string text = m.GetProperty("text").GetProperty("body").GetString() ?? "";
 
                             var exists = IdExists(incomingMsgId);
-                            if(exists)
-                            { 
-                                return; 
+                            if (exists)
+                            {
+                                return;
                             }
                             else
                             {
                                 AddId(incomingMsgId);
                             }
-                                // RULE-BASED initial message check
-                                bool isInitial = Regex.IsMatch(
-                                                     text,
-                                                     @"\b(hi|hello|hey|get started|start|good morning|good afternoon)\b",
-                                                     RegexOptions.IgnoreCase);
+                            // RULE-BASED initial message check
+                            bool isInitial = await IsInitialMessageAsync(m, from, text);
+                            bool isQuery = IsQueryMessage(text);
                             
-
                             var rec = new MessageRecord
                             {
                                 Body = text,
                                 From = from,
                                 Incoming = true,
                                 To = _opts.BusinessPhoneNumber,
-                                ReceivedAt = DateTimeOffset.UtcNow
+                                ReceivedAt = DateTimeOffset.UtcNow,
+                                Status = "received"
                             };
-                            string replyText = string.Empty;
-                            string mailBody = string.Empty;
-                            string ticket = string.Empty;
-                            if (isInitial)
-                            {
-                                replyText = $"Hi, Please mention Your Query in this format \"<CustID> :<Query>\"";//";
-                            }
-                            else
-                            {
-                                var pattern = @"^(?<code>[A-Z]{3}\d{3})\s*:\s*(?<message>.+)$";
-                                var regex=new Regex(pattern, RegexOptions.IgnoreCase);
-                                var match = regex.Match(text);
-                                if (match.Success)
-                                {
-                                    ticket = match.Groups["code"].Value;
-                                    if (!clients.Where(cust => cust.CustomerId == ticket).Any())
-                                    {
-                                        replyText = $"Sorry there is no one with the CustomerId: {ticket} with us.";
-                                    }
-                                    else
-                                    {
-                                        var message = match.Groups["message"].Value;
-                                        mailBody = $"Query from {clients.FirstOrDefault(cust => cust.CustomerId == ticket).ClientName} and query is {message}.";//await _geminiService.GetFormalQueryMailBodyAsync(message, clients.FirstOrDefault(cust => cust.CustomerId == ticket).ClientName, CancellationToken.None);
-                                        replyText = "Query has been registered successfully.";
-                                    }
-                                }
-                                
-                            }
-                            var resp = await _whatsAppService.SendTextAsync(to: from!, text: replyText, mailBody,ticket,"");
-                            var respContent = await resp.Content.ReadAsStringAsync();
 
+                            // Save message first to get the ID
                             await _repo.CreateMessageAsync(rec);
+                            // Track last message time in memory store for conversation recency
+                            if (!string.IsNullOrEmpty(from))
+                            {
+                                await _store.SetLastMessageTimeAsync(from, DateTime.UtcNow);
+                            }
+
+                            // Create or update ticket if it's a query
+                            Ticket? ticket = null;
+                            if (isQuery && !string.IsNullOrEmpty(from))
+                            {
+                                var customerQuery = text.Split(':');
+                                var client=clients.FirstOrDefault(client=>client.CustomerId == customerQuery[0].Trim());
+                                ticket = await CreateOrUpdateTicketAsync(rec, from, client?.ClientName +"'s query:"+customerQuery[1], isInitial);
+                            }
+
+                            // Generate appropriate reply
+                            var replyText = GenerateReplyText(text, isQuery, isInitial, ticket);
+
+                            var resp = await _whatsAppService.SendTextAsync(isInitial,to: from!, text: replyText);
+                            var respContent = await resp.Content.ReadAsStringAsync();
                         }
                     }
                 }
             }
-            catch (Exception ex)
-            {
+            catch (Exception ex) {
                 throw new Exception(ex.Message, ex);
             }
         }
-        Queue<string> lastFiveIds = new Queue<string>();
 
-        private void AddId(string newId)
-        {
-            // If we already have 5, remove the oldest
-            if (lastFiveIds.Count == 5)
-                lastFiveIds.Dequeue();
-
-            lastFiveIds.Enqueue(newId);
-        }
-        bool IdExists(string id)
-        {
-            return lastFiveIds.Contains(id);
-        }
         public static List<ClientDetails> ReadClientDetails(string filePath)
         {
             var list = new List<ClientDetails>();
@@ -182,11 +155,134 @@ namespace backend.Services
 
             return list;
         }
+        public class ClientDetails
+        {
+            public string ClientName { get; set; }
+            public string ClientMailId { get; set; }
+            public string CustomerId { get; set; }
+        }
+        Queue<string> lastFiveIds = new Queue<string>();
 
+        private void AddId(string newId)
+        {
+            // If we already have 5, remove the oldest
+            if (lastFiveIds.Count == 5)
+                lastFiveIds.Dequeue();
+
+            lastFiveIds.Enqueue(newId);
+        }
+        bool IdExists(string id)
+        {
+            return lastFiveIds.Contains(id);
+        }
+        /// <summary>
+        /// Determines if a message is a query (not just a greeting)
+        /// </summary>
+        private bool IsQueryMessage(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            // If it's just a greeting, it's not a query
+            if (GreetingIdentifierRegex.IsMatch(text) && text.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).Length <= 3)
+                return false;
+
+            // Check if message contains question marks or query-related keywords
+            if (text.Contains('?') || text.Contains('？'))
+                return true;
+
+            // Check for query keywords
+            if (QueryIdentifierRegex.IsMatch(text))
+                return true;
+
+            // If message is longer than a simple greeting and not just a greeting, treat as query
+            if (text.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).Length > 3)
+                return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Determines ticket priority based on query content
+        /// </summary>
+        private string DeterminePriority(string queryText)
+        {
+            if (string.IsNullOrWhiteSpace(queryText))
+                return "Medium";
+
+            var lowerText = queryText.ToLowerInvariant();
+
+            // Urgent keywords
+            if (Regex.IsMatch(lowerText, @"\b(urgent|emergency|critical|asap|immediately|broken|down|not working|error|failed)\b"))
+                return "Urgent";
+
+            // High priority keywords
+            if (Regex.IsMatch(lowerText, @"\b(important|issue|problem|help|support|complaint)\b"))
+                return "High";
+
+            return "Medium";
+        }
+
+        /// <summary>
+        /// Generates a unique ticket number
+        /// </summary>
+        private async Task<string> GenerateTicketNumberAsync()
+        {
+            var ticketCount = await _repo.GetTicketCountAsync();
+            var ticketNumber = $"TKT-{DateTimeOffset.UtcNow:yyyyMMdd}-{ticketCount + 1:D6}";
+            return ticketNumber;
+        }
+
+        /// <summary>
+        /// Generates a subject line for the ticket from the query text
+        /// </summary>
+        private string GenerateTicketSubject(string queryText)
+        {
+            if (string.IsNullOrWhiteSpace(queryText))
+                return "Customer Query";
+
+            // Take first 50 characters or first sentence
+            var subject = queryText.Trim();
+            var firstSentenceEnd = subject.IndexOfAny(new[] { '.', '!', '?', '？' });
+            
+            if (firstSentenceEnd > 0 && firstSentenceEnd <= 50)
+                subject = subject.Substring(0, firstSentenceEnd);
+            else if (subject.Length > 50)
+                subject = string.Concat(subject.AsSpan(0, 47), "...");
+            
+            return subject;
+        }
+
+        /// <summary>
+        /// Generates appropriate reply text based on message type and ticket status
+        /// </summary>
+        private string GenerateReplyText(string incomingText, bool isQuery, bool isInitial, Ticket? ticket)
+        {
+            if (!isQuery)
+            {
+                // Greeting or simple message
+                return $"Hi! Please send your query in this format  <CustId> : <Query>";
+            }
+
+            if (ticket != null)
+            {
+                if (isInitial)
+                {
+                    return $"Thank you for your query. We have created a support ticket #{ticket.TicketNumber} for your request. Our team will get back to you soon.";
+                }
+                else
+                {
+                    return $"Thank you for the additional information. We've updated your ticket #{ticket.TicketNumber}. Our team is working on it.";
+                }
+            }
+
+            // Fallback
+            return $"Thank you for your message. We have received your query and will respond shortly.";
+        }
+       
 
         private async Task<bool> IsInitialMessageAsync(JsonElement msgElement, string? from, string? incomingText)
         {
-            return false;
             // 1) If the incoming payload explicitly has context.message_id, it's a reply (NOT initial)
             if (msgElement.TryGetProperty("context", out var ctx) && ctx.ValueKind == JsonValueKind.Object)
             {
@@ -221,28 +317,69 @@ namespace backend.Services
             return true;
         }
 
+        /// <summary>
+        /// Creates a new ticket or updates existing open ticket for the customer
+        /// </summary>
+        private async Task<Ticket?> CreateOrUpdateTicketAsync(MessageRecord message, string customerPhone, string queryText, bool isInitial)
+        {
+            try
+            {
+                // Check if there's an existing open ticket for this customer
+                var openTickets = await _repo.GetOpenTicketsByCustomerPhoneAsync(customerPhone);
+                Ticket ticket;
+
+                if (openTickets.Any() && !isInitial)
+                {
+                    // Update existing open ticket
+                    ticket = openTickets.First();
+                    ticket.Description += $"\n\n[{DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm}] {queryText}";
+                    ticket.MessageIds.Add(message.Id!);
+                    ticket.UpdatedAt = DateTimeOffset.UtcNow;
+                    await _repo.UpdateTicketAsync(ticket);
+                }
+                else
+                {
+                    // Create new ticket
+                    var ticketNumber = await GenerateTicketNumberAsync();
+
+                    // Try to find user by phone (if registered)
+                    // This is optional - you may need to store phone numbers in User model
+                    string? customerId = null;
+                    string? tenantId = null;
+
+                    ticket = new Ticket
+                    {
+                        TicketNumber = ticketNumber,
+                        Subject = GenerateTicketSubject(queryText),
+                        Description = queryText,
+                        Status = "Open",
+                        Priority = DeterminePriority(queryText),
+                        CustomerPhoneNumber = customerPhone,
+                        CustomerId = customerId,
+                        TenantId = tenantId,
+                        InitialMessageId = message.Id,
+                        MessageIds = new List<string> { message.Id! },
+                        CreatedAt = DateTimeOffset.UtcNow,
+                        UpdatedAt = DateTimeOffset.UtcNow
+                    };
+
+                    await _repo.CreateTicketAsync(ticket);
+                }
+
+                return ticket;
+            }
+            catch (Exception ex)
+            {
+                // Log error but don't fail the message processing
+                Console.WriteLine($"Error creating/updating ticket: {ex.Message}");
+                return null;
+            }
+        }
+
         [GeneratedRegex(@"\b(hi|hello|hey|get started|start|good morning|good afternoon)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled, "en-IN")]
         private static partial Regex GreetingRegex();
 
-        private string getUserName(string id)
-        {
-            // Dummy list
-            var items = new List<User>
-                        {
-                            new User { Id = "1", Name = "Alpha" },
-                            new User { Id = "2", Name = "Beta" },
-                            new User { Id = "3", Name = "Gamma" },
-                            new User { Id = "4", Name = "Delta" },
-                            new User { Id = "5", Name = "Omega" }
-                        };
-            return items.Where(usr => usr.Id == id).FirstOrDefault().Name;
-        }
-    }
-
-    public class ClientDetails
-    {
-        public string ClientName { get; set; }
-        public string ClientMailId { get; set; }
-        public string CustomerId { get; set; }
+        [GeneratedRegex(@"\b(question|query|help|support|issue|problem|complaint|request|need|want|how|what|when|where|why|can|could|would|please|help me|i need|i want)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled, "en-IN")]
+        private static partial Regex QueryRegex();
     }
 }

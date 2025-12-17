@@ -2,6 +2,7 @@
 using backend.Infrastructure;
 using backend.Models;
 using backend.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 
@@ -9,6 +10,7 @@ namespace backend.Controllers
 {
     [ApiController]
     [Route("api/chat")]
+    [Authorize]
     public class MessagesController : ControllerBase
     {
         private readonly MongoRepo _repo;
@@ -39,7 +41,7 @@ namespace backend.Controllers
                 // Save intent to DB (optimistic)
                 await _repo.CreateMessageAsync(record);
 
-                var resp = await _whatsAppService.SendTextAsync(message.To, message.Message,"","","");
+                var resp = await _whatsAppService.SendTextAsync(false,message.To, message.Message);
                 if (!resp.IsSuccessStatusCode)
                 {
                     // Update DB etc - simplified

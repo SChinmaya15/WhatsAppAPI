@@ -1,11 +1,9 @@
 ﻿using backend.Config;
 using System.Text.Json;
-using Newtonsoft.Json;
 using backend.Services;
 using backend.Infrastructure;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
-using Newtonsoft.Json.Linq;
 
 namespace backend.Controllers
 {
@@ -38,7 +36,7 @@ namespace backend.Controllers
         {
             using var reader = new StreamReader(Request.Body);
             var body = await reader.ReadToEndAsync();
-            
+
             Console.WriteLine("Incoming: " + body);
 
             if (string.IsNullOrWhiteSpace(body))
@@ -52,7 +50,7 @@ namespace backend.Controllers
             {
                 payload = JsonDocument.Parse(body);
             }
-            catch (System.Text.Json.JsonException ex)
+            catch (JsonException ex)
             {
                 // Invalid JSON sent
                 Console.WriteLine("Invalid JSON: " + ex.Message);

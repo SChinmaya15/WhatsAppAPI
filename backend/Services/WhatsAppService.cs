@@ -1,11 +1,12 @@
-﻿using backend.Config;
-using backend.Infrastructure;
+﻿using System.Text;
+using backend.Config;
 using backend.Models;
-using Microsoft.Extensions.Options;
+using backend.Infrastructure;
 using System.Net.Http.Headers;
-using System.Text;
+using Microsoft.Extensions.Options;
 using static System.Net.Mime.MediaTypeNames;
 using JsonConvert = Newtonsoft.Json.JsonConvert;
+using System.Text.Json;
 
 namespace backend.Services
 {
@@ -25,7 +26,7 @@ namespace backend.Services
             _emailService = emailService;
         }
 
-        public async Task<HttpResponseMessage> SendTextAsync(string to, string text, string mailBody, string custId,string toMail, bool useTemplate = false, object templatePayload = null)
+        public async Task<HttpResponseMessage> SendTextAsync(bool isInitial,string to, string text, bool useTemplate = false, object templatePayload = null)
         {
             var client = _http.CreateClient("meta");
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _opts.AccessToken);
@@ -43,21 +44,27 @@ namespace backend.Services
 
             // Use graph API with the phone number id path (versioned path optional)
             var reqUri = $"{_opts.PhoneNumberId}/messages";
-            var content = new StringContent(JsonConvert.SerializeObject(body), Encoding.UTF8, "application/json");
-            
+            StringContent? content = null;
+            //if (isInitial) {
+            //    var json = await SendAskForIdCardAsync(to);
+            //    content = new StringContent(json, Encoding.UTF8, "application/json");
+            //}
+            //else
+            //{
+                content = new StringContent(JsonConvert.SerializeObject(body), Encoding.UTF8, "application/json");
+            //}
             var resp = await client.PostAsync(reqUri, content);
             if (resp.StatusCode == System.Net.HttpStatusCode.OK)
             { 
-               // await _repo.CreateMessageAsync(replyText);
+                await _repo.CreateMessageAsync(replyText);
                 try
                 {
                     var message = $"Message to {to} was sent successfully at {DateTime.UtcNow}.";
                     var emailBodyText = PopulateMessageContent(to, message);
-                    if(mailBody!="")
                     await _emailService.SendEmailAsync(
-                        subject: $"Query Raised from Customer: {custId}",
-                        toEmail: string.IsNullOrEmpty(toMail) ?"samchinmaya15@gmail.com":toMail,
-                        body: mailBody
+                        subject: "WhatsApp Message Sent",
+                        toEmail: "imbhavneetkumar@gmail.com",
+                        body: $"Message to {to} was sent successfully at {DateTime.UtcNow}."
                     );
                     await _repo.CreateMessageAsync(emailBodyText);
                 }
@@ -69,7 +76,62 @@ namespace backend.Services
             }
             return resp;
         }
+        public async Task<string> SendAskForIdCardAsync(string toPhoneNumber)
+        {
+            var payload = new
+            {
+                messaging_product = "whatsapp",
+                to = toPhoneNumber,
+                type = "interactive",
+                interactive = new
+                {
+                    type = "list",
+                    header = new
+                    {
+                        type = "text",
+                        text = "Verification Required"
+                    },
+                    body = new
+                    {
+                        text = "Please provide your Customer ID to continue."
+                    },
+                    footer = new
+                    {
+                        text = "Tap below to proceed"
+                    },
+                    action = new
+                    {
+                        button = "Provide ID",
+                        sections = new[]
+                        {
+                    new
+                    {
+                        title = "Verification",
+                        rows = new[]
+                        {
+                            new
+                            {
+                                id = "ENTER_CUSTOMER_ID",
+                                title = "Enter Customer ID",
+                                description = "Provide your 6-digit ID"
+                            }
+                        }
+                    }
+                }
+                    }
+                }
+            };
 
+            //using var client = new HttpClient();
+            //client.DefaultRequestHeaders.Authorization =
+            //    new AuthenticationHeaderValue("Bearer", accessToken);
+
+            var json = JsonSerializer.Serialize(payload);
+            return json;
+            //var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            //await client.PostAsync(url, content);
+        }
         private MessageRecord PopulateMessageContent(string to, string text)
         {
             return new MessageRecord
