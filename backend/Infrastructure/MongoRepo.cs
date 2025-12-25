@@ -16,7 +16,10 @@ namespace backend.Infrastructure
         
         public MongoRepo(IConfiguration cfg)
         {
-            var client = new MongoClient(cfg["Mongo:ConnectionString"]);
+            var settings = MongoClientSettings.FromConnectionString(cfg["Mongo:ConnectionString"]);
+            // Set the ServerApi field of the settings object to set the version of the Stable API on the client
+            settings.ServerApi = new ServerApi(ServerApiVersion.V1);
+            var client = new MongoClient(settings);
             var db = client.GetDatabase(cfg["Mongo:Database"]);
             _messages = db.GetCollection<MessageRecord>("messages");
             _users = db.GetCollection<User>("users");
